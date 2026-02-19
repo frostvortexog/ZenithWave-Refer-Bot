@@ -12,7 +12,7 @@ DATABASE_URL = "postgresql://postgres.rhswwhjuaxkbjrsquevl:RadheyRadhe@aws-1-ap-
 BOT_USERNAME = "Sheinn_Refer_Bot"
 BASE_URL = "https://zenithwave-refer-bot.onrender.com"
 
-  ADMIN_IDS = [8537079657, 8222581668]
+ADMIN_IDS = [8537079657, 8222581668]
 
 CHANNELS = [
     "@ZenithWave_Shein",
