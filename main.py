@@ -10,7 +10,7 @@ from datetime import datetime
 BOT_TOKEN = "8566776302:AAFzmjD96qirFe5P0OTI7orA29H8lbfEaGU"
 DATABASE_URL = "postgresql://postgres.rhswwhjuaxkbjrsquevl:RadheyRadhe@aws-1-ap-south-1.pooler.supabase.com:5432/postgres"
 BOT_USERNAME = "Sheinn_Refer_Bot"
-BASE_URL = "https://your-render-url.onrender.com"
+BASE_URL = "https://zenithwave-refer-bot.onrender.com"
 
   ADMIN_IDS = [8537079657, 8222581668]
 
