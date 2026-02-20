@@ -432,23 +432,49 @@ async def webhook(req: Request):
         await tg_send(user_id, f"🔗 Your referral link:\n{link}")
         return {"ok": True}
 
-    if text == "💰 Withdraw":
+       if text == "💰 Withdraw":
         assert pool is not None
+
+        # Check verification
         async with pool.acquire() as conn:
-            verified = await conn.fetchval("SELECT verified FROM public.bot_users WHERE user_id=$1", user_id)
+            verified = await conn.fetchval(
+                "SELECT verified FROM public.bot_users WHERE user_id=$1",
+                user_id
+            )
+
         if not verified:
             await tg_send(user_id, "❌ Please verify first. Send /start")
             return {"ok": True}
 
         kb = []
+
         async with pool.acquire() as conn:
+            # Get all withdraw points in one query (faster)
+            settings_rows = await conn.fetch(
+                "SELECT coupon_type, required_points FROM public.settings"
+            )
+            req_map = {r["coupon_type"]: r["required_points"] for r in settings_rows}
+
             for k, label in COUPON_TYPES.items():
-                stock = await conn.fetchval("SELECT COUNT(*) FROM public.coupons WHERE type=$1 AND is_used=FALSE", k)
-                kb.append([{"text": f"{label} (Stock: {stock})", "callback_data": f"withdraw_{k}"}])
+                stock = await conn.fetchval(
+                    "SELECT COUNT(*) FROM public.coupons WHERE type=$1 AND is_used=FALSE",
+                    k
+                )
 
-        await tg_send(user_id, "Select withdraw option:", reply_markup={"inline_keyboard": kb})
+                required_points = req_map.get(k, 0)
+
+                kb.append([{
+                    "text": f"{label} (Stock: {stock} | Points: {required_points})",
+                    "callback_data": f"withdraw_{k}"
+                }])
+
+        await tg_send(
+            user_id,
+            "Select withdraw option:",
+            reply_markup={"inline_keyboard": kb}
+        )
         return {"ok": True}
-
+           
     # admin
     if text == "/admin":
         if not is_admin(user_id):
