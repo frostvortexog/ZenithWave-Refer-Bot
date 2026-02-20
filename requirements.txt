@@ -1,4 +1,5 @@
-fastapi
+ fastapi
 uvicorn
 asyncpg
 httpx
+python-multipart
