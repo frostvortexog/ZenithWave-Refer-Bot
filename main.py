@@ -15,7 +15,7 @@ DATABASE_URL = "postgresql://postgres.rhswwhjuaxkbjrsquevl:RadheyRadhe@aws-1-ap-
 BOT_USERNAME = "Sheinn_Refer_Bot"  # without @
 BASE_URL = "https://zenithwave-refer-bot.onrender.com"
 
-BOT_DISPLAY_NAME = "ZenithWave Refer Bot"
+BOT_DISPLAY_NAME = "Shein Refer Bot"
 
 ADMIN_IDS = [8537079657, 8222581668]
 
@@ -299,14 +299,37 @@ async def verify_page(uid: int, token: str):
     return HTMLResponse(html)
 
 
-@app.post("/verify", response_class=HTMLResponse)
-async def verify_submit(request: Request):
-    form = await request.form()
-    uid = int(form.get("uid", "0"))
-    token = str(form.get("token", ""))
+    assert pool is not None
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            # Get current status first
+            row = await conn.fetchrow(
+                "SELECT verified, referred_by FROM public.bot_users WHERE user_id=$1 FOR UPDATE",
+                uid
+            )
+            old_verified = bool(row["verified"]) if row else False
+            ref = row["referred_by"] if row else None
 
-    if token != make_token(uid):
-        return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
+            # ✅ GUARANTEED: set verified TRUE (even if user row missing)
+            await conn.execute("""
+                INSERT INTO public.bot_users(user_id, verified, updated_at)
+                VALUES($1, TRUE, NOW())
+                ON CONFLICT (user_id) DO UPDATE
+                SET verified=TRUE, updated_at=NOW()
+            """, uid)
+
+            # Give referral reward ONLY ONCE (only when changing false -> true)
+            if (not old_verified) and ref and ref != uid:
+                await conn.execute("""
+                    UPDATE public.bot_users
+                    SET points = points + 1,
+                        total_referrals = total_referrals + 1,
+                        updated_at = NOW()
+                    WHERE user_id = $1
+                """, ref)
+
+    # ✅ Send Telegram confirmation so user knows it worked
+    await tg_send(uid, "✅ Web verification completed! Now tap: Check Verification")
 
     # ... your DB verify logic ...
 
