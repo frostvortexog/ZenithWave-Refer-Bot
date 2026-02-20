@@ -1,3 +1,4 @@
+import ssl
 import hashlib
 import re
 from typing import Optional, Dict, Any
@@ -96,11 +97,15 @@ DO UPDATE SET required_points = EXCLUDED.required_points;
 async def startup():
     global pool, http_client
 
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode = ssl.CERT_NONE
+
     pool = await asyncpg.create_pool(
         DATABASE_URL,
         min_size=1,
         max_size=10,
-        ssl=True   # ✅ ADD THIS LINE
+        ssl=ssl_ctx
     )
 
     http_client = httpx.AsyncClient(timeout=10.0)
