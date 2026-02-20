@@ -123,6 +123,15 @@ async def shutdown():
     if pool:
         await pool.close()
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+@app.get("/dbtest")
+async def dbtest():
+    async with pool.acquire() as conn:
+        x = await conn.fetchval("SELECT 1")
+    return {"db": x}
 
 # ================= SMALL HELPERS =================
 def make_token(uid: int) -> str:
