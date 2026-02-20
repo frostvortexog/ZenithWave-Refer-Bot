@@ -488,19 +488,26 @@ if ($text) {
   }
 
   // Stats
-  if ($text === "Stats") {
-    $stmt = $pdo->prepare("SELECT points, (SELECT COUNT(*) FROM users WHERE ref_by=?) AS refs FROM users WHERE id=?");
-    $stmt->execute([$user_id, $user_id, $user_id]);
+if ($text === "Stats") {
+    $stmt = $pdo->prepare("
+        SELECT 
+            points,
+            (SELECT COUNT(*) FROM users WHERE ref_by=?) AS refs
+        FROM users
+        WHERE id=?
+    ");
+    $stmt->execute([$user_id, $user_id]); // ✅ FIXED (2 values only)
     $row = $stmt->fetch();
+
     $points = (int)($row["points"] ?? 0);
-    $refs = (int)($row["refs"] ?? 0);
+    $refs   = (int)($row["refs"] ?? 0);
 
     bot("sendMessage", [
-      "chat_id"=>$chat_id,
-      "text"=>"📊 Stats\n\n👥 Referrals: $refs\n⭐ Points: $points"
+      "chat_id" => $chat_id,
+      "text" => "📊 Stats\n\n👥 Referrals: $refs\n⭐ Points: $points"
     ]);
     exit;
-  }
+}
 
   // Referral Link
   if ($text === "Referral Link") {
