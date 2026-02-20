@@ -1,696 +1,648 @@
-import ssl
-import re
-import hashlib
-import traceback
-from typing import Optional, Dict, Any
+import os
+import json
+import secrets
+from typing import Optional, Dict, Any, List, Tuple
 
-import asyncpg
-import httpx
+import psycopg2
+import psycopg2.extras
+
 from fastapi import FastAPI, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
-# ================= CONFIG =================
-# ⚠️ SECURITY: Rotate your Bot Token + DB password if they were shared publicly.
-BOT_TOKEN = "8566776302:AAFzmjD96qirFe5P0OTI7orA29H8lbfEaGU"
-DATABASE_URL = "postgresql://postgres.rhswwhjuaxkbjrsquevl:RadheyRadhe@aws-1-ap-south-1.pooler.supabase.com:5432/postgres"
-BOT_USERNAME = "Sheinn_Refer_Bot"  # without @
-BASE_URL = "https://zenithwave-refer-bot.onrender.com"
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+)
 
-BOT_DISPLAY_NAME = "Shein Refer Bot"
+# =========================================================
+# ENV
+# =========================================================
+BOT_TOKEN = (os.getenv("BOT_TOKEN") or "").strip()
+PUBLIC_BASE_URL = (os.getenv("PUBLIC_BASE_URL") or "").strip().rstrip("/")
+BOT_USERNAME = (os.getenv("BOT_USERNAME") or "YourBot").strip()  # without @
+PORT = int(os.getenv("PORT") or "10000")
 
-ADMIN_IDS = [8537079657, 8222581668]
+ADMIN_IDS = [int(x.strip()) for x in (os.getenv("ADMIN_IDS") or "").split(",") if x.strip().isdigit()]
 
-CHANNELS = [
-    "@ZenithWave_Shein",
-    "@lootxupdates",
-    "@dragoncodexshop"
-]
+DB_HOST = (os.getenv("DB_HOST") or "").strip()
+DB_PORT = int(os.getenv("DB_PORT") or "5432")
+DB_NAME = (os.getenv("DB_NAME") or "postgres").strip()
+DB_USER = (os.getenv("DB_USER") or "").strip()
+DB_PASS = (os.getenv("DB_PASS") or "").strip()
 
-COUPON_TYPES = {
-    "500": "500 OFF ON 500",
-    "1000": "1000 OFF ON 1000",
-    "2000": "2000 OFF ON 2000",
-    "4000": "4000 OFF ON 4000"
-}
 
-# ================= APP =================
-app = FastAPI()
-pool: Optional[asyncpg.Pool] = None
-http_client: Optional[httpx.AsyncClient] = None
+def must_env(name: str, v: str):
+    if not v:
+        raise RuntimeError(f"Missing ENV: {name}")
 
-# ================= GLOBAL ERROR HANDLER =================
-@app.exception_handler(Exception)
-async def all_exception_handler(request: Request, exc: Exception):
-    print("🔥 ERROR:", repr(exc))
-    traceback.print_exc()
-    return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 
-# ================= DB SCHEMA (AUTO CREATE) =================
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS public.bot_users (
-  user_id BIGINT PRIMARY KEY,
-  username TEXT,
-  points INTEGER NOT NULL DEFAULT 0,
-  total_referrals INTEGER NOT NULL DEFAULT 0,
-  referred_by BIGINT NULL,
-  verified BOOLEAN NOT NULL DEFAULT FALSE,
-  left_penalized BOOLEAN NOT NULL DEFAULT FALSE,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
+must_env("BOT_TOKEN", BOT_TOKEN)
+must_env("PUBLIC_BASE_URL", PUBLIC_BASE_URL)
+must_env("DB_HOST", DB_HOST)
+must_env("DB_USER", DB_USER)
+must_env("DB_PASS", DB_PASS)
 
-CREATE TABLE IF NOT EXISTS public.coupons (
-  id SERIAL PRIMARY KEY,
-  type TEXT NOT NULL,
-  code TEXT NOT NULL UNIQUE,
-  is_used BOOLEAN NOT NULL DEFAULT FALSE,
-  used_by BIGINT NULL,
-  used_at TIMESTAMP NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS public.redeems (
-  id SERIAL PRIMARY KEY,
-  user_id BIGINT NOT NULL,
-  coupon_type TEXT NOT NULL,
-  code TEXT NOT NULL,
-  points_used INTEGER NOT NULL,
-  created_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS public.settings (
-  coupon_type TEXT PRIMARY KEY,
-  required_points INTEGER NOT NULL
-);
-
-INSERT INTO public.settings (coupon_type, required_points) VALUES
-('500', 1),
-('1000', 2),
-('2000', 3),
-('4000', 4)
-ON CONFLICT (coupon_type) DO UPDATE
-SET required_points = EXCLUDED.required_points;
-
-CREATE TABLE IF NOT EXISTS public.bot_states (
-  user_id BIGINT PRIMARY KEY,
-  mode TEXT NULL,
-  coupon_type TEXT NULL,
-  updated_at TIMESTAMP NOT NULL DEFAULT NOW()
-);
-"""
-
-# ================= STARTUP / SHUTDOWN =================
-@app.on_event("startup")
-async def startup():
-    global pool, http_client
-
-    # Supabase pooler SSL cert chain often fails verification on Render.
-    # This SSL context avoids the SSLCertVerificationError.
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode = ssl.CERT_NONE
-
-    pool = await asyncpg.create_pool(
-        DATABASE_URL,
-        min_size=1,
-        max_size=10,
-        ssl=ssl_ctx
+# =========================================================
+# DB helpers
+# =========================================================
+def db_conn():
+    return psycopg2.connect(
+        host=DB_HOST, port=DB_PORT, dbname=DB_NAME, user=DB_USER, password=DB_PASS
     )
 
-    http_client = httpx.AsyncClient(timeout=httpx.Timeout(10.0))
 
-    async with pool.acquire() as conn:
-        await conn.execute(SCHEMA_SQL)
+def db_exec(query: str, params: tuple = (), fetchone=False, fetchall=False):
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            if fetchone:
+                return cur.fetchone()
+            if fetchall:
+                return cur.fetchall()
+            return None
 
-@app.on_event("shutdown")
-async def shutdown():
-    global pool, http_client
-    if http_client:
-        await http_client.aclose()
-    if pool:
-        await pool.close()
 
-# ================= HELPERS =================
 def is_admin(uid: int) -> bool:
     return uid in ADMIN_IDS
 
-def make_token(uid: int) -> str:
-    return hashlib.sha256(str(uid).encode()).hexdigest()
 
-async def tg(method: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    assert http_client is not None
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/{method}"
-    r = await http_client.post(url, json=data)
-    return r.json()
+# =========================================================
+# settings (4 channels)
+# =========================================================
+FORCE_JOIN_COUNT = 3  # ✅ only 4 channels
 
-async def tg_send(chat_id: int, text: str, reply_markup: Optional[dict] = None):
-    payload = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    await tg("sendMessage", payload)
 
-def force_join_keyboard():
+def get_setting(key: str, default):
+    row = db_exec("select value from settings where key=%s", (key,), fetchone=True)
+    if not row:
+        return default
+    return row["value"]
+
+
+def set_setting(key: str, value):
+    db_exec(
+        """
+        insert into settings(key, value) values(%s, %s::jsonb)
+        on conflict (key) do update set value=excluded.value
+        """,
+        (key, json.dumps(value, ensure_ascii=False)),
+    )
+
+
+def get_force_channels() -> List[str]:
+    default = ["@channel1", "@channel2", "@channel3"]
+    val = get_setting("force_join_channels", default)
+
+    if isinstance(val, list):
+        out = [str(x).strip() for x in val][:FORCE_JOIN_COUNT]
+        while len(out) < FORCE_JOIN_COUNT:
+            out.append("")
+        return out
+
+    return default
+
+
+def get_redeem_rules() -> Dict[str, Dict[str, int]]:
+    default = {
+        "500": {"points": 3},
+        "1000": {"points": 10},
+        "2000": {"points": 25},
+        "4000": {"points": 40},
+    }
+    val = get_setting("redeem_rules", default)
+    if isinstance(val, dict):
+        for k in default:
+            val.setdefault(k, {})
+            val[k].setdefault("points", default[k]["points"])
+        return val
+    return default
+
+
+def coupon_label(t: str) -> str:
+    return {
+        "500": "500 off 500",
+        "1000": "1000 off 1000",
+        "2000": "2000 off 2000",
+        "4000": "4000 off 4000",
+    }.get(t, t)
+
+
+# =========================================================
+# users
+# =========================================================
+def upsert_user(uid: int, username: Optional[str], first_name: Optional[str]):
+    db_exec(
+        """
+        insert into users(tg_id, username, first_name, last_seen)
+        values(%s, %s, %s, now())
+        on conflict (tg_id) do update set
+          username=excluded.username,
+          first_name=excluded.first_name,
+          last_seen=now()
+        """,
+        (uid, username, first_name),
+    )
+
+
+def get_user(uid: int) -> Optional[Dict[str, Any]]:
+    return db_exec("select * from users where tg_id=%s", (uid,), fetchone=True)
+
+
+def set_state(uid: int, state: Optional[str], state_data: Optional[Dict[str, Any]] = None):
+    db_exec(
+        "update users set state=%s, state_data=%s::jsonb where tg_id=%s",
+        (state, json.dumps(state_data, ensure_ascii=False) if state_data else None, uid),
+    )
+
+
+def clear_state(uid: int):
+    set_state(uid, None, None)
+
+
+def safe_name(u: Dict[str, Any]) -> str:
+    if u.get("first_name"):
+        return str(u["first_name"])
+    if u.get("username"):
+        return "@" + str(u["username"])
+    return str(u.get("tg_id", ""))
+
+
+# =========================================================
+# referral award ONLY after verified
+# =========================================================
+def set_referred_by_if_needed(new_uid: int, ref_uid: int):
+    if new_uid == ref_uid:
+        return
+    row = db_exec("select referred_by from users where tg_id=%s", (new_uid,), fetchone=True)
+    if not row or row["referred_by"] is not None:
+        return
+    db_exec("update users set referred_by=%s where tg_id=%s", (ref_uid, new_uid))
+
+
+def award_referral_if_applicable(new_uid: int) -> Optional[int]:
+    u = get_user(new_uid)
+    if not u or not u.get("verified") or u.get("referral_awarded") or not u.get("referred_by"):
+        return None
+
+    ref = int(u["referred_by"])
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "update users set referral_awarded=true where tg_id=%s and referral_awarded=false",
+                (new_uid,),
+            )
+            if cur.rowcount <= 0:
+                return None
+            cur.execute("update users set points=points+1, referrals=referrals+1 where tg_id=%s", (ref,))
+    return ref
+
+
+# =========================================================
+# force join check (4 channels)
+# =========================================================
+async def check_force_join(app: Application, uid: int) -> Tuple[bool, List[str], List[str]]:
+    channels = get_force_channels()
+    not_joined = []
+    for ch in channels:
+        ch = ch.strip()
+        if not ch:
+            continue
+        try:
+            mem = await app.bot.get_chat_member(chat_id=ch, user_id=uid)
+            if mem.status in ("left", "kicked"):
+                not_joined.append(ch)
+        except Exception:
+            not_joined.append(ch)
+    return (len(not_joined) == 0, channels, not_joined)
+
+
+# =========================================================
+# coupons
+# =========================================================
+def stock_counts() -> Dict[str, int]:
+    out = {}
+    for t in ["500", "1000", "2000", "4000"]:
+        row = db_exec(
+            "select count(*) c from coupons where coupon_type=%s and is_used=false",
+            (t,),
+            fetchone=True,
+        )
+        out[t] = int(row["c"]) if row else 0
+    return out
+
+
+def add_coupons(t: str, codes: List[str]) -> int:
+    if t not in ["500", "1000", "2000", "4000"]:
+        return 0
+    cleaned = [c.strip() for c in codes if c.strip()]
+    if not cleaned:
+        return 0
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            for code in cleaned:
+                cur.execute(
+                    "insert into coupons(coupon_type, code, is_used) values(%s, %s, false)",
+                    (t, code),
+                )
+    return len(cleaned)
+
+
+def remove_unused_coupons(t: str, count: int) -> int:
+    if t not in ["500", "1000", "2000", "4000"] or count <= 0:
+        return 0
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                delete from coupons
+                where id in (
+                    select id from coupons
+                    where coupon_type=%s and is_used=false
+                    order by id asc
+                    limit %s
+                )
+                """,
+                (t, count),
+            )
+            return cur.rowcount
+
+
+def redeem_coupon(uid: int, t: str) -> Tuple[bool, str, int]:
+    if t not in ["500", "1000", "2000", "4000"]:
+        return (False, "Invalid option.", 0)
+
+    u = get_user(uid)
+    if not u:
+        return (False, "User not found.", 0)
+    if not u.get("verified"):
+        return (False, "Please verify first.", 0)
+
+    rules = get_redeem_rules()
+    need = int(rules.get(t, {}).get("points", 999999))
+
+    if int(u.get("points", 0)) < need:
+        return (False, f"Not enough points.\nRequired: {need}\nYou have: {u.get('points', 0)}", 0)
+
+    with db_conn() as conn:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                select id, code from coupons
+                where coupon_type=%s and is_used=false
+                order by id asc
+                limit 1
+                for update
+                """,
+                (t,),
+            )
+            row = cur.fetchone()
+            if not row:
+                return (False, f"Out of stock for {coupon_label(t)}", 0)
+
+            coupon_id = int(row["id"])
+            code = row["code"]
+
+            cur.execute("update coupons set is_used=true, used_by=%s, used_at=now() where id=%s", (uid, coupon_id))
+            cur.execute("update users set points=points-%s where tg_id=%s", (need, uid))
+            cur.execute(
+                "insert into redeems(tg_id, coupon_type, coupon_code, points_spent) values(%s,%s,%s,%s)",
+                (uid, t, code, need),
+            )
+    return (True, code, need)
+
+
+# =========================================================
+# web verification (device lock)
+# =========================================================
+def create_verify_token(uid: int) -> str:
+    token = secrets.token_urlsafe(24)
+    db_exec("update users set verify_token=%s where tg_id=%s", (token, uid))
+    return token
+
+
+def verify_on_web(token: str, device_id: str) -> Tuple[bool, str, Optional[int]]:
+    token = (token or "").strip()
+    device_id = (device_id or "").strip()
+    if not token or not device_id:
+        return (False, "Missing token/device.", None)
+
+    u = db_exec("select tg_id from users where verify_token=%s", (token,), fetchone=True)
+    if not u:
+        return (False, "Invalid or expired token.", None)
+
+    tg_id = int(u["tg_id"])
+
+    d = db_exec("select tg_id from device_verifications where device_id=%s", (device_id,), fetchone=True)
+    if d and int(d["tg_id"]) != tg_id:
+        return (False, "This device is already verified with another account.", tg_id)
+
+    d2 = db_exec("select device_id from device_verifications where tg_id=%s", (tg_id,), fetchone=True)
+    if d2 and str(d2.get("device_id")) != device_id:
+        return (False, "This Telegram ID is already verified on a different device.", tg_id)
+
+    with db_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("update users set verified=true where tg_id=%s", (tg_id,))
+            cur.execute(
+                """
+                insert into device_verifications(device_id, tg_id)
+                values(%s, %s)
+                on conflict (device_id) do update set tg_id=excluded.tg_id, verified_at=now()
+                """,
+                (device_id, tg_id),
+            )
+
+    return (True, "Verified successfully. Now go back to Telegram and click Check Verification.", tg_id)
+
+
+# =========================================================
+# Keyboards
+# =========================================================
+def kb_join_channels(channels: List[str]) -> InlineKeyboardMarkup:
     rows = []
-    for ch in CHANNELS:
-        rows.append([{"text": f"Join {ch}", "url": f"https://t.me/{ch[1:]}"}])
-    rows.append([{"text": "✅ Joined All Channels", "callback_data": "recheck_join"}])
-    return {"inline_keyboard": rows}
+    for ch in channels:
+        ch = ch.strip()
+        if ch:
+            rows.append([InlineKeyboardButton(f"Join {ch}", url="https://t.me/" + ch.lstrip("@"))])
+    rows.append([InlineKeyboardButton("✅ Joined All Channels", callback_data="joined_all")])
+    return InlineKeyboardMarkup(rows)
 
-def user_menu_keyboard():
-    return {"keyboard": [["📊 Stats"], ["🔗 Referral Link"], ["💰 Withdraw"]], "resize_keyboard": True}
 
-def admin_menu_keyboard():
-    return {"keyboard": [["➕ Add Coupon"], ["📦 Stock"], ["📜 Redeems Log"], ["⚙ Change Withdraw Points"]], "resize_keyboard": True}
+def kb_verify_actions(verify_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔐 Verify", url=verify_url)],
+        [InlineKeyboardButton("✅ Check Verification", callback_data="check_verification")],
+    ])
 
-async def check_member(user_id: int, channel: str) -> bool:
-    js = await tg("getChatMember", {"chat_id": channel, "user_id": user_id})
-    if js.get("ok"):
-        return js["result"]["status"] in ("member", "administrator", "creator")
-    return False
 
-async def force_join_ok(user_id: int) -> bool:
-    for ch in CHANNELS:
-        if not await check_member(user_id, ch):
-            return False
-    return True
+def user_menu(uid: int) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("📊 Stats", callback_data="stats"),
+         InlineKeyboardButton("🏆 Leaderboard", callback_data="leaderboard")],
+        [InlineKeyboardButton("🎟️ Redeem", callback_data="redeem_menu"),
+         InlineKeyboardButton("🔗 Referral Link", callback_data="ref_link")],
+    ]
+    if is_admin(uid):
+        rows.append([InlineKeyboardButton("🛠 Admin Panel", callback_data="admin_panel")])
+    return InlineKeyboardMarkup(rows)
 
-async def ensure_user(user_id: int, username: str):
-    assert pool is not None
-    async with pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO public.bot_users(user_id, username)
-            VALUES($1,$2)
-            ON CONFLICT (user_id) DO UPDATE
-            SET username=EXCLUDED.username, updated_at=NOW()
-        """, user_id, username)
 
-async def set_state(user_id: int, mode: Optional[str], coupon_type: Optional[str] = None):
-    assert pool is not None
-    async with pool.acquire() as conn:
-        if mode is None:
-            await conn.execute("DELETE FROM public.bot_states WHERE user_id=$1", user_id)
-        else:
-            await conn.execute("""
-                INSERT INTO public.bot_states(user_id, mode, coupon_type, updated_at)
-                VALUES($1,$2,$3,NOW())
-                ON CONFLICT (user_id) DO UPDATE
-                SET mode=EXCLUDED.mode, coupon_type=EXCLUDED.coupon_type, updated_at=NOW()
-            """, user_id, mode, coupon_type)
+# =========================================================
+# Text builders
+# =========================================================
+def join_text() -> str:
+    return "📢 <b>Join these channels first</b>\n\nAfter joining, click <b>✅ Joined All Channels</b>."
 
-async def get_state(user_id: int):
-    assert pool is not None
-    async with pool.acquire() as conn:
-        return await conn.fetchrow("SELECT mode, coupon_type FROM public.bot_states WHERE user_id=$1", user_id)
 
-# ================= TEST ROUTES =================
-@app.get("/")
-async def home():
-    return {"ok": True, "message": "Bot running"}
+def verify_text() -> str:
+    return "✅ <b>Great!</b>\nNow verify on website:\n\n1) Click <b>🔐 Verify</b>\n2) Complete verification\n3) Come back and click <b>✅ Check Verification</b>"
 
-@app.get("/health")
-async def health():
-    return {"ok": True}
 
-@app.get("/dbtest")
-async def dbtest():
-    assert pool is not None
-    async with pool.acquire() as conn:
-        x = await conn.fetchval("SELECT 1")
-    return {"db": x}
+def welcome_text(uid: int) -> str:
+    link = f"https://t.me/{BOT_USERNAME}?start={uid}"
+    return (
+        "🎉 <b>WELCOME!</b>\n\n"
+        "Use the menu below 👇\n\n"
+        f"🔗 Your Referral Link:\n<code>{link}</code>"
+    )
 
-# ================= VERIFY UI =================
-VERIFY_PAGE_HTML = r"""
-<!doctype html><html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>__NAME__ • Verification</title>
-<style>
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:#eaf0ff;
-background:radial-gradient(1200px 600px at 15% 10%, rgba(91,140,255,.35), transparent 55%),
-radial-gradient(900px 500px at 92% 35%, rgba(155,91,255,.26), transparent 60%),
-linear-gradient(160deg,#070a12,#0b1224);font-family:system-ui}
-.card{width:min(560px,100%);border-radius:20px;padding:22px;
-background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.14);
-box-shadow:0 20px 70px rgba(0,0,0,.55);position:relative;overflow:hidden}
-.btn{width:100%;padding:14px 16px;border:none;border-radius:14px;
-background:linear-gradient(135deg,#5b8cff,#2b58ff);color:white;font-weight:800;font-size:16px;cursor:pointer}
-.overlay{position:absolute;inset:0;display:none;place-items:center;background:rgba(7,10,18,.72);backdrop-filter:blur(8px)}
-.overlay.on{display:grid}
-.spinner{width:56px;height:56px;border-radius:50%;border:4px solid rgba(255,255,255,.18);
-border-top-color:rgba(91,140,255,.95);animation:spin 1s linear infinite;margin:2px auto 14px}
-@keyframes spin{to{transform:rotate(360deg)}}
-</style></head><body>
-<div class="card">
-  <h2 style="margin:0 0 6px">__NAME__</h2>
-  <p style="margin:0 0 16px;color:rgba(234,240,255,.72)">Tap verify to unlock the bot menu.</p>
-  <form id="vf" method="POST" action="/verify">
-    <input type="hidden" name="uid" value="__UID__"/>
-    <input type="hidden" name="token" value="__TOKEN__"/>
-    <button class="btn" id="vb" type="submit">✅ Verify Now</button>
-  </form>
-  <div id="ov" class="overlay">
-    <div style="text-align:center">
-      <div class="spinner"></div>
-      <div style="font-weight:700">Verifying…</div>
-      <div style="color:rgba(234,240,255,.72)">Please wait</div>
-    </div>
+
+def stats_text(uid: int) -> str:
+    u = get_user(uid) or {}
+    verified = "✅ Verified" if u.get("verified") else "❌ Not Verified"
+    link = f"https://t.me/{BOT_USERNAME}?start={uid}"
+    return (
+        "📊 <b>Your Stats</b>\n\n"
+        f"Status: <b>{verified}</b>\n"
+        f"Points: <b>{int(u.get('points', 0))}</b>\n"
+        f"Referrals: <b>{int(u.get('referrals', 0))}</b>\n\n"
+        f"🔗 Referral Link:\n<code>{link}</code>\n\n"
+        "⚠️ Referrals count only after the joined user verifies."
+    )
+
+
+# =========================================================
+# Telegram handlers (flow)
+# =========================================================
+async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    upsert_user(uid, update.effective_user.username, update.effective_user.first_name)
+
+    if context.args and context.args[0].isdigit():
+        set_referred_by_if_needed(uid, int(context.args[0]))
+
+    channels = get_force_channels()
+    await update.message.reply_text(
+        join_text(),
+        parse_mode="HTML",
+        reply_markup=kb_join_channels(channels),
+        disable_web_page_preview=True,
+    )
+
+
+async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    upsert_user(uid, update.effective_user.username, update.effective_user.first_name)
+    await update.message.reply_text("Use buttons 👇", reply_markup=user_menu(uid))
+
+
+async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    uid = q.from_user.id
+    upsert_user(uid, q.from_user.username, q.from_user.first_name)
+    data = q.data or ""
+    await q.answer()
+
+    if data == "joined_all":
+        all_joined, channels, _ = await check_force_join(context.application, uid)
+        if not all_joined:
+            await q.edit_message_text(
+                "⚠️ <b>You still haven't joined all channels</b>\n\nPlease join and click again.",
+                parse_mode="HTML",
+                reply_markup=kb_join_channels(channels),
+            )
+            return
+
+        token = create_verify_token(uid)
+        verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
+
+        await context.application.bot.send_message(
+            chat_id=q.message.chat_id,
+            text=verify_text(),
+            parse_mode="HTML",
+            reply_markup=kb_verify_actions(verify_url),
+            disable_web_page_preview=True,
+        )
+        return
+
+    if data == "check_verification":
+        all_joined, channels, _ = await check_force_join(context.application, uid)
+        if not all_joined:
+            await q.edit_message_text(
+                "⚠️ <b>You haven't joined all channels.</b>\n\nJoin and click Joined All Channels.",
+                parse_mode="HTML",
+                reply_markup=kb_join_channels(channels),
+            )
+            return
+
+        u = get_user(uid) or {}
+        if not u.get("verified"):
+            token = create_verify_token(uid)
+            verify_url = f"{PUBLIC_BASE_URL}/verify?token={token}"
+            await q.edit_message_text(
+                "❌ <b>Not verified yet.</b>\n\nClick Verify and complete it, then click Check Verification.",
+                parse_mode="HTML",
+                reply_markup=kb_verify_actions(verify_url),
+            )
+            return
+
+        ref_id = award_referral_if_applicable(uid)
+        if ref_id:
+            try:
+                await context.application.bot.send_message(
+                    chat_id=ref_id,
+                    text=f"✅ <b>Referral Added!</b>\nYou got <b>+1</b> point because <b>{safe_name(u)}</b> verified.",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                pass
+
+        await q.edit_message_text(welcome_text(uid), parse_mode="HTML", reply_markup=user_menu(uid))
+        return
+
+    if data == "stats":
+        await q.edit_message_text(stats_text(uid), parse_mode="HTML", reply_markup=user_menu(uid))
+        return
+
+    if data == "ref_link":
+        link = f"https://t.me/{BOT_USERNAME}?start={uid}"
+        await q.edit_message_text(f"🔗 <b>Your Referral Link</b>\n\n<code>{link}</code>", parse_mode="HTML", reply_markup=user_menu(uid))
+        return
+
+
+# =========================================================
+# FastAPI app
+# =========================================================
+app = FastAPI()
+tg_app: Optional[Application] = None
+
+VERIFY_HTML = """<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Verify</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body{font-family:Arial, sans-serif; margin:24px;}
+    .card{max-width:520px; margin:auto; padding:18px; border:1px solid #ddd; border-radius:12px;}
+    button{width:100%; padding:12px; font-size:16px; border-radius:10px; border:0; cursor:pointer;}
+    .ok{color:green; font-weight:700;}
+    .bad{color:#b00020; font-weight:700;}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>🔐 Web Verification</h2>
+    <p><b>Rule:</b> 1 device = 1 Telegram account</p>
+    <button id="btn">✅ Verify Now</button>
+    <p id="msg"></p>
+    <p id="done" style="display:none;">✅ Done. Go back to Telegram and click <b>Check Verification</b>.</p>
   </div>
-</div>
+
 <script>
-document.getElementById("vf").addEventListener("submit", ()=>{
-  document.getElementById("ov").classList.add("on");
-  document.getElementById("vb").disabled = true;
-});
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token") || "";
+
+  function getDeviceId(){
+    let id = localStorage.getItem("device_id");
+    if(!id){
+      id = (crypto.randomUUID ? crypto.randomUUID() :
+        'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+          const r = Math.random()*16|0, v = c==='x'?r:(r&0x3|0x8);
+          return v.toString(16);
+        })
+      );
+      localStorage.setItem("device_id", id);
+    }
+    return id;
+  }
+
+  document.getElementById("btn").onclick = async () => {
+    const msg = document.getElementById("msg");
+    msg.textContent = "Verifying...";
+    try {
+      const res = await fetch("/api/verify", {
+        method:"POST",
+        headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({ token, device_id: getDeviceId() })
+      });
+      const j = await res.json();
+      if(j.ok){
+        msg.innerHTML = '<span class="ok">✅ '+j.message+'</span>';
+        document.getElementById("done").style.display = "block";
+        document.getElementById("btn").disabled = true;
+      } else {
+        msg.innerHTML = '<span class="bad">❌ '+j.message+'</span>';
+      }
+    } catch(e){
+      msg.innerHTML = '<span class="bad">❌ Network error</span>';
+    }
+  }
 </script>
-</body></html>
+</body>
+</html>
 """
 
-SUCCESS_PAGE_HTML = r"""
-<!doctype html><html><head>
-<meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>__NAME__ • Verified</title>
-<style>
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:#eaf0ff;
-background:radial-gradient(1200px 600px at 15% 10%, rgba(91,140,255,.35), transparent 55%),
-radial-gradient(900px 500px at 92% 35%, rgba(155,91,255,.26), transparent 60%),
-linear-gradient(160deg,#070a12,#0b1224);font-family:system-ui}
-.box{width:min(520px,100%);border-radius:20px;padding:22px;background:rgba(255,255,255,.07);
-border:1px solid rgba(255,255,255,.14);box-shadow:0 20px 70px rgba(0,0,0,.55);text-align:center}
-</style></head><body>
-<div class="box">
-  <div style="font-size:44px">✅</div>
-  <h2 style="margin:6px 0">Verified ✅</h2>
-  <p style="margin:0;color:rgba(234,240,255,.72)">Redirecting to Telegram…</p>
-  <p style="margin:10px 0 0;color:rgba(234,240,255,.62);font-size:13px">__NAME__</p>
-</div>
-<script>
-setTimeout(()=>{ window.location.href="https://t.me/__BOT__"; }, 1200);
-</script>
-</body></html>
-"""
+@app.get("/", response_class=PlainTextResponse)
+def health():
+    return "OK"
 
 @app.get("/verify", response_class=HTMLResponse)
-async def verify_page(uid: int, token: str):
-    if token != make_token(uid):
-        return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
+def verify_page(token: str = ""):
+    return HTMLResponse(VERIFY_HTML)
 
-    html = (
-        VERIFY_PAGE_HTML
-        .replace("__NAME__", BOT_DISPLAY_NAME)
-        .replace("__UID__", str(uid))
-        .replace("__TOKEN__", token)
-    )
-    return HTMLResponse(html)
+@app.post("/api/verify")
+async def api_verify(req: Request):
+    body = await req.json()
+    token = (body.get("token") or "").strip()
+    device_id = (body.get("device_id") or "").strip()
+    ok, message, tg_id = verify_on_web(token, device_id)
+    return JSONResponse({"ok": ok, "message": message, "tg_id": tg_id})
 
-@app.post("/verify", response_class=HTMLResponse)
-async def verify_submit(request: Request):
-    form = await request.form()
-    uid = int(form.get("uid", "0"))
-    token = str(form.get("token", ""))
-
-    if token != make_token(uid):
-        return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
-
-    if not await force_join_ok(uid):
-        return HTMLResponse("<h3>Please join all channels first, then verify again.</h3>", status_code=403)
-
-    # ✅ GUARANTEED VERIFY (always sets verified=TRUE)
-    assert pool is not None
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow(
-                "SELECT verified, referred_by FROM public.bot_users WHERE user_id=$1 FOR UPDATE",
-                uid
-            )
-            old_verified = bool(row["verified"]) if row else False
-            ref = row["referred_by"] if row else None
-
-            await conn.execute("""
-                INSERT INTO public.bot_users(user_id, verified, updated_at)
-                VALUES($1, TRUE, NOW())
-                ON CONFLICT (user_id) DO UPDATE
-                SET verified=TRUE, updated_at=NOW()
-            """, uid)
-
-            if (not old_verified) and ref and ref != uid:
-                await conn.execute("""
-                    UPDATE public.bot_users
-                    SET points = points + 1,
-                        total_referrals = total_referrals + 1,
-                        updated_at = NOW()
-                    WHERE user_id = $1
-                """, ref)
-
-    await tg_send(uid, "✅ Web verification completed! Now tap: Check Verification")
-
-    html = (
-        SUCCESS_PAGE_HTML
-        .replace("__NAME__", BOT_DISPLAY_NAME)
-        .replace("__BOT__", BOT_USERNAME)
-    )
-    return HTMLResponse(html)
-
-# ================= WEBHOOK =================
-@app.post("/webhook")
-async def webhook(req: Request):
+@app.post("/telegram")
+async def telegram_webhook(req: Request):
     data = await req.json()
+    update = Update.de_json(data, tg_app.bot)  # type: ignore
+    await tg_app.process_update(update)        # type: ignore
+    return JSONResponse({"ok": True})
 
-    if "callback_query" in data:
-        return await handle_callback(data["callback_query"])
+async def build_telegram():
+    global tg_app
+    tg_app = Application.builder().token(BOT_TOKEN).build()
+    tg_app.add_handler(CommandHandler("start", start_cmd))
+    tg_app.add_handler(CallbackQueryHandler(on_callback))
+    tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
 
-    if "message" not in data:
-        return {"ok": True}
+    await tg_app.initialize()
+    await tg_app.bot.set_webhook(f"{PUBLIC_BASE_URL}/telegram")
+    await tg_app.start()
 
-    msg = data["message"]
-    u = msg.get("from", {})
-    user_id = int(u.get("id"))
-    username = u.get("username", "") or ""
-    text = msg.get("text", "") or ""
+@app.on_event("startup")
+async def on_startup():
+    await build_telegram()
 
-    await ensure_user(user_id, username)
+@app.on_event("shutdown")
+async def on_shutdown():
+    if tg_app:
+        await tg_app.stop()
+        await tg_app.shutdown()
 
-    # admin state flows
-    st = await get_state(user_id)
-    if st and st["mode"]:
-        if await handle_state_message(user_id, text, st):
-            return {"ok": True}
-
-    # start
-    if text.startswith("/start"):
-        ref_id = None
-        m = re.search(r"ref_(\d+)", text)
-        if m:
-            try:
-                ref_id = int(m.group(1))
-            except:
-                ref_id = None
-
-        if not await force_join_ok(user_id):
-            await tg_send(user_id, "⚠️ Join all channels first.", reply_markup=force_join_keyboard())
-            return {"ok": True}
-
-        # save ref once
-        if ref_id and ref_id != user_id:
-            async with pool.acquire() as conn:
-                await conn.execute("""
-                    UPDATE public.bot_users
-                    SET referred_by=$1, updated_at=NOW()
-                    WHERE user_id=$2 AND referred_by IS NULL
-                """, ref_id, user_id)
-
-        token = make_token(user_id)
-        verify_link = f"{BASE_URL}/verify?uid={user_id}&token={token}"
-
-        await tg_send(
-            user_id,
-            "🌐 Complete web verification:",
-            reply_markup={"inline_keyboard": [
-                [{"text": "Verify Now", "url": verify_link}],
-                [{"text": "Check Verification", "callback_data": "check_verify"}]
-            ]}
-        )
-        return {"ok": True}
-
-    # user menu
-    if text == "📊 Stats":
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT points,total_referrals,verified FROM public.bot_users WHERE user_id=$1",
-                user_id
-            )
-        if not row or not row["verified"]:
-            await tg_send(user_id, "❌ Please verify first. Send /start")
-            return {"ok": True}
-        await tg_send(user_id, f"👥 Referrals: {row['total_referrals']}\n⭐ Points: {row['points']}")
-        return {"ok": True}
-
-    if text == "🔗 Referral Link":
-        async with pool.acquire() as conn:
-            verified = await conn.fetchval(
-                "SELECT verified FROM public.bot_users WHERE user_id=$1",
-                user_id
-            )
-        if not verified:
-            await tg_send(user_id, "❌ Please verify first. Send /start")
-            return {"ok": True}
-        link = f"https://t.me/{BOT_USERNAME}?start=ref_{user_id}"
-        await tg_send(user_id, f"🔗 Your referral link:\n{link}")
-        return {"ok": True}
-
-    if text == "💰 Withdraw":
-        # Check verification
-        async with pool.acquire() as conn:
-            verified = await conn.fetchval(
-                "SELECT verified FROM public.bot_users WHERE user_id=$1",
-                user_id
-            )
-
-        if not verified:
-            await tg_send(user_id, "❌ Please verify first. Send /start")
-            return {"ok": True}
-
-        kb = []
-        async with pool.acquire() as conn:
-            # Get all withdraw points in one query (faster)
-            settings_rows = await conn.fetch(
-                "SELECT coupon_type, required_points FROM public.settings"
-            )
-            req_map = {r["coupon_type"]: r["required_points"] for r in settings_rows}
-
-            for k, label in COUPON_TYPES.items():
-                stock = await conn.fetchval(
-                    "SELECT COUNT(*) FROM public.coupons WHERE type=$1 AND is_used=FALSE",
-                    k
-                )
-                required_points = req_map.get(k, 0)
-                kb.append([{
-                    "text": f"{label} (Stock: {stock} | Points: {required_points})",
-                    "callback_data": f"withdraw_{k}"
-                }])
-
-        await tg_send(user_id, "Select withdraw option:", reply_markup={"inline_keyboard": kb})
-        return {"ok": True}
-
-    # admin
-    if text == "/admin":
-        if not is_admin(user_id):
-            await tg_send(user_id, "❌ Not admin.")
-            return {"ok": True}
-        await tg_send(user_id, "✅ Admin Panel", reply_markup=admin_menu_keyboard())
-        return {"ok": True}
-
-    if is_admin(user_id) and text == "➕ Add Coupon":
-        kb = [[{"text": COUPON_TYPES[k], "callback_data": f"admin_add_{k}"}] for k in COUPON_TYPES]
-        await tg_send(user_id, "Select type to add:", reply_markup={"inline_keyboard": kb})
-        return {"ok": True}
-
-    if is_admin(user_id) and text == "📦 Stock":
-        lines = ["📦 Stock:\n"]
-        async with pool.acquire() as conn:
-            for k, label in COUPON_TYPES.items():
-                stock = await conn.fetchval(
-                    "SELECT COUNT(*) FROM public.coupons WHERE type=$1 AND is_used=FALSE",
-                    k
-                )
-                lines.append(f"{label}: {stock}")
-        await tg_send(user_id, "\n".join(lines))
-        return {"ok": True}
-
-    if is_admin(user_id) and text == "📜 Redeems Log":
-        async with pool.acquire() as conn:
-            rows = await conn.fetch(
-                "SELECT user_id,coupon_type,code,points_used FROM public.redeems ORDER BY id DESC LIMIT 10"
-            )
-        if not rows:
-            await tg_send(user_id, "No redeems yet.")
-            return {"ok": True}
-        out = ["📜 Last 10 Redeems:\n"]
-        for r in rows:
-            out.append(
-                f"User: {r['user_id']} | {COUPON_TYPES.get(r['coupon_type'], r['coupon_type'])} | {r['code']} | -{r['points_used']} pts"
-            )
-        await tg_send(user_id, "\n".join(out))
-        return {"ok": True}
-
-    if is_admin(user_id) and text == "⚙ Change Withdraw Points":
-        kb = [[{"text": COUPON_TYPES[k], "callback_data": f"admin_points_{k}"}] for k in COUPON_TYPES]
-        await tg_send(user_id, "Select type to change points:", reply_markup={"inline_keyboard": kb})
-        return {"ok": True}
-
-    return {"ok": True}
-
-# ================= CALLBACKS =================
-async def handle_callback(cb: dict):
-    cb_id = cb["id"]
-    user_id = int(cb["from"]["id"])
-    data = cb.get("data", "")
-
-    await tg("answerCallbackQuery", {"callback_query_id": cb_id})
-    await ensure_user(user_id, cb["from"].get("username", "") or "")
-
-    if data == "recheck_join":
-        if await force_join_ok(user_id):
-            await tg_send(user_id, "✅ Channels verified. Send /start now.")
-        else:
-            await tg_send(user_id, "❌ You still haven't joined all channels.", reply_markup=force_join_keyboard())
-        return {"ok": True}
-
-    if data == "check_verify":
-        async with pool.acquire() as conn:
-            verified = await conn.fetchval(
-                "SELECT verified FROM public.bot_users WHERE user_id=$1",
-                user_id
-            )
-
-        if verified:
-            await tg_send(user_id, "✅ Verified!", reply_markup=user_menu_keyboard())
-        else:
-            await tg_send(user_id, "❌ Not verified yet. Send /start and verify.")
-        return {"ok": True}
-
-    if data.startswith("withdraw_"):
-        ctype = data.split("_", 1)[1]
-        if ctype not in COUPON_TYPES:
-            await tg_send(user_id, "Invalid option.")
-            return {"ok": True}
-
-        if not await force_join_ok(user_id):
-            await tg_send(user_id, "⚠️ Join all channels first.", reply_markup=force_join_keyboard())
-            return {"ok": True}
-
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                verified = await conn.fetchval(
-                    "SELECT verified FROM public.bot_users WHERE user_id=$1",
-                    user_id
-                )
-                if not verified:
-                    await tg_send(user_id, "❌ Verify first. Send /start")
-                    return {"ok": True}
-
-                required = await conn.fetchval(
-                    "SELECT required_points FROM public.settings WHERE coupon_type=$1",
-                    ctype
-                )
-                points = await conn.fetchval(
-                    "SELECT points FROM public.bot_users WHERE user_id=$1 FOR UPDATE",
-                    user_id
-                )
-
-                if points is None:
-                    await tg_send(user_id, "Send /start first.")
-                    return {"ok": True}
-
-                if required is None:
-                    await tg_send(user_id, "Admin has not set points for this coupon type.")
-                    return {"ok": True}
-
-                if points < required:
-                    await tg_send(user_id, "❌ Not enough points.")
-                    return {"ok": True}
-
-                coupon = await conn.fetchrow("""
-                    SELECT id, code FROM public.coupons
-                    WHERE type=$1 AND is_used=FALSE
-                    ORDER BY id ASC
-                    FOR UPDATE SKIP LOCKED
-                    LIMIT 1
-                """, ctype)
-
-                if not coupon:
-                    await tg_send(user_id, "❌ Out of stock.")
-                    return {"ok": True}
-
-                await conn.execute(
-                    "UPDATE public.coupons SET is_used=TRUE, used_by=$1, used_at=NOW() WHERE id=$2",
-                    user_id, coupon["id"]
-                )
-                await conn.execute(
-                    "UPDATE public.bot_users SET points=points-$1, updated_at=NOW() WHERE user_id=$2",
-                    required, user_id
-                )
-                await conn.execute(
-                    "INSERT INTO public.redeems(user_id,coupon_type,code,points_used) VALUES($1,$2,$3,$4)",
-                    user_id, ctype, coupon["code"], required
-                )
-
-        await tg_send(user_id, f"🎉 Redeemed!\n{COUPON_TYPES[ctype]}\n\n✅ Code:\n{coupon['code']}")
-
-        for a in ADMIN_IDS:
-            await tg_send(a, f"🧾 Redeem\nUser: {user_id}\nType: {COUPON_TYPES[ctype]}\nPoints: -{required}\nCode: {coupon['code']}")
-        return {"ok": True}
-
-    if data.startswith("admin_add_"):
-        if not is_admin(user_id):
-            return {"ok": True}
-        ctype = data.split("_", 2)[2]
-        await set_state(user_id, "await_codes", ctype)
-        await tg_send(user_id, f"Send codes line-by-line for {COUPON_TYPES.get(ctype, ctype)}")
-        return {"ok": True}
-
-    if data.startswith("admin_points_"):
-        if not is_admin(user_id):
-            return {"ok": True}
-        ctype = data.split("_", 2)[2]
-        await set_state(user_id, "await_points", ctype)
-        await tg_send(user_id, f"Send required points number for {COUPON_TYPES.get(ctype, ctype)}")
-        return {"ok": True}
-
-    return {"ok": True}
-
-# ================= STATE INPUT =================
-async def handle_state_message(user_id: int, text: str, st) -> bool:
-    mode = st["mode"]
-    ctype = st["coupon_type"]
-
-    if mode == "await_codes":
-        if not is_admin(user_id):
-            await set_state(user_id, None)
-            return True
-
-        codes = [c.strip() for c in text.splitlines() if c.strip()]
-        if not codes:
-            await tg_send(user_id, "❌ Send codes line-by-line.")
-            return True
-
-        inserted = 0
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                for code in codes:
-                    await conn.execute("""
-                        INSERT INTO public.coupons(type, code) VALUES($1,$2)
-                        ON CONFLICT (code) DO NOTHING
-                    """, ctype, code)
-                    inserted += 1
-
-        await set_state(user_id, None)
-        await tg_send(user_id, f"✅ Added {inserted} codes.", reply_markup=admin_menu_keyboard())
-        return True
-
-    if mode == "await_points":
-        if not is_admin(user_id):
-            await set_state(user_id, None)
-            return True
-
-        try:
-            pts = int(text.strip())
-        except:
-            await tg_send(user_id, "❌ Send a number only.")
-            return True
-
-        async with pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO public.settings(coupon_type, required_points)
-                VALUES($1,$2)
-                ON CONFLICT (coupon_type) DO UPDATE
-                SET required_points=EXCLUDED.required_points
-            """, ctype, pts)
-
-        await set_state(user_id, None)
-        await tg_send(
-            user_id,
-            f"✅ Updated points: {COUPON_TYPES.get(ctype, ctype)} → {pts}",
-            reply_markup=admin_menu_keyboard()
-        )
-        return True
-
-    return False
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(main, host="0.0.0.0", port=PORT, log_level="info")
