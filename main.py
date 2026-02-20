@@ -490,23 +490,34 @@ async def handle_callback(cb: dict):
     await tg("answerCallbackQuery", {"callback_query_id": cb_id})
     await ensure_user(user_id, cb["from"].get("username", "") or "")
 
+    # 1) Recheck join
     if data == "recheck_join":
         if await force_join_ok(user_id):
             await tg_send(user_id, "✅ Channels verified. Send /start now.")
         else:
-            await tg_send(user_id, "❌ You still haven't joined all channels.", reply_markup=force_join_keyboard())
+            await tg_send(
+                user_id,
+                "❌ You still haven't joined all channels.",
+                reply_markup=force_join_keyboard()
+            )
         return {"ok": True}
 
+    # 2) Check verification
     if data == "check_verify":
         assert pool is not None
         async with pool.acquire() as conn:
-            verified = await conn.fetchval("SELECT verified FROM public.bot_users WHERE user_id=$1", user_id)
+            verified = await conn.fetchval(
+                "SELECT verified FROM public.bot_users WHERE user_id=$1",
+                user_id
+            )
+
         if verified:
             await tg_send(user_id, "✅ Verified!", reply_markup=user_menu_keyboard())
         else:
             await tg_send(user_id, "❌ Not verified yet. Send /start and verify.")
         return {"ok": True}
 
+    # 3) Withdraw
     if data.startswith("withdraw_"):
         ctype = data.split("_", 1)[1]
         if ctype not in COUPON_TYPES:
@@ -520,16 +531,29 @@ async def handle_callback(cb: dict):
         assert pool is not None
         async with pool.acquire() as conn:
             async with conn.transaction():
-                verified = await conn.fetchval("SELECT verified FROM public.bot_users WHERE user_id=$1", user_id)
+                verified = await conn.fetchval(
+                    "SELECT verified FROM public.bot_users WHERE user_id=$1",
+                    user_id
+                )
                 if not verified:
                     await tg_send(user_id, "❌ Verify first. Send /start")
                     return {"ok": True}
 
-                required = await conn.fetchval("SELECT required_points FROM public.settings WHERE coupon_type=$1", ctype)
-                points = await conn.fetchval("SELECT points FROM public.bot_users WHERE user_id=$1 FOR UPDATE", user_id)
+                required = await conn.fetchval(
+                    "SELECT required_points FROM public.settings WHERE coupon_type=$1",
+                    ctype
+                )
+                points = await conn.fetchval(
+                    "SELECT points FROM public.bot_users WHERE user_id=$1 FOR UPDATE",
+                    user_id
+                )
 
                 if points is None:
                     await tg_send(user_id, "Send /start first.")
+                    return {"ok": True}
+
+                if required is None:
+                    await tg_send(user_id, "Admin has not set points for this coupon type.")
                     return {"ok": True}
 
                 if points < required:
@@ -548,16 +572,32 @@ async def handle_callback(cb: dict):
                     await tg_send(user_id, "❌ Out of stock.")
                     return {"ok": True}
 
-                await conn.execute("UPDATE public.coupons SET is_used=TRUE, used_by=$1, used_at=NOW() WHERE id=$2", user_id, coupon["id"])
-                await conn.execute("UPDATE public.bot_users SET points=points-$1, updated_at=NOW() WHERE user_id=$2", required, user_id)
-                await conn.execute("INSERT INTO public.redeems(user_id,coupon_type,code,points_used) VALUES($1,$2,$3,$4)", user_id, ctype, coupon["code"], required)
+                await conn.execute(
+                    "UPDATE public.coupons SET is_used=TRUE, used_by=$1, used_at=NOW() WHERE id=$2",
+                    user_id, coupon["id"]
+                )
+                await conn.execute(
+                    "UPDATE public.bot_users SET points=points-$1, updated_at=NOW() WHERE user_id=$2",
+                    required, user_id
+                )
+                await conn.execute(
+                    "INSERT INTO public.redeems(user_id,coupon_type,code,points_used) VALUES($1,$2,$3,$4)",
+                    user_id, ctype, coupon["code"], required
+                )
 
-        await tg_send(user_id, f"🎉 Redeemed!\n{COUPON_TYPES[ctype]}\n\n✅ Code:\n{coupon['code']}")
+        await tg_send(
+            user_id,
+            f"🎉 Redeemed!\n{COUPON_TYPES[ctype]}\n\n✅ Code:\n{coupon['code']}"
+        )
 
         for a in ADMIN_IDS:
-            await tg_send(a, f"🧾 Redeem\nUser: {user_id}\nType: {COUPON_TYPES[ctype]}\nPoints: -{required}\nCode: {coupon['code']}")
+            await tg_send(
+                a,
+                f"🧾 Redeem\nUser: {user_id}\nType: {COUPON_TYPES[ctype]}\nPoints: -{required}\nCode: {coupon['code']}"
+            )
         return {"ok": True}
 
+    # 4) Admin add coupons
     if data.startswith("admin_add_"):
         if not is_admin(user_id):
             return {"ok": True}
@@ -566,6 +606,7 @@ async def handle_callback(cb: dict):
         await tg_send(user_id, f"Send codes line-by-line for {COUPON_TYPES.get(ctype, ctype)}")
         return {"ok": True}
 
+    # 5) Admin change points
     if data.startswith("admin_points_"):
         if not is_admin(user_id):
             return {"ok": True}
