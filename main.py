@@ -95,8 +95,15 @@ DO UPDATE SET required_points = EXCLUDED.required_points;
 @app.on_event("startup")
 async def startup():
     global pool, http_client
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=10)
-    http_client = httpx.AsyncClient(timeout=httpx.Timeout(8.0))
+
+    pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=10,
+        ssl=True   # ✅ ADD THIS LINE
+    )
+
+    http_client = httpx.AsyncClient(timeout=10.0)
 
     # create schema
     async with pool.acquire() as conn:
