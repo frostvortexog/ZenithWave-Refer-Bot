@@ -299,10 +299,23 @@ async def verify_page(uid: int, token: str):
     return HTMLResponse(html)
 
 
+@app.post("/verify", response_class=HTMLResponse)
+async def verify_submit(request: Request):
+    form = await request.form()
+    uid = int(form.get("uid", "0"))
+    token = str(form.get("token", ""))
+
+    if token != make_token(uid):
+        return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
+
+    # Must still be in all channels
+    if not await force_join_ok(uid):
+        return HTMLResponse("<h3>Please join all channels first, then verify again.</h3>", status_code=403)
+
+    # ✅ GUARANTEED VERIFY (always sets verified=TRUE)
     assert pool is not None
     async with pool.acquire() as conn:
         async with conn.transaction():
-            # Get current status first
             row = await conn.fetchrow(
                 "SELECT verified, referred_by FROM public.bot_users WHERE user_id=$1 FOR UPDATE",
                 uid
@@ -310,7 +323,6 @@ async def verify_page(uid: int, token: str):
             old_verified = bool(row["verified"]) if row else False
             ref = row["referred_by"] if row else None
 
-            # ✅ GUARANTEED: set verified TRUE (even if user row missing)
             await conn.execute("""
                 INSERT INTO public.bot_users(user_id, verified, updated_at)
                 VALUES($1, TRUE, NOW())
@@ -318,7 +330,7 @@ async def verify_page(uid: int, token: str):
                 SET verified=TRUE, updated_at=NOW()
             """, uid)
 
-            # Give referral reward ONLY ONCE (only when changing false -> true)
+            # reward only once
             if (not old_verified) and ref and ref != uid:
                 await conn.execute("""
                     UPDATE public.bot_users
@@ -328,40 +340,14 @@ async def verify_page(uid: int, token: str):
                     WHERE user_id = $1
                 """, ref)
 
-    # ✅ Send Telegram confirmation so user knows it worked
+    # send telegram confirmation
     await tg_send(uid, "✅ Web verification completed! Now tap: Check Verification")
-
-    # ... your DB verify logic ...
 
     html = (SUCCESS_PAGE_HTML
             .replace("__NAME__", BOT_DISPLAY_NAME)
             .replace("__BOT__", BOT_USERNAME))
     return HTMLResponse(html)
-
-    # Must still be in all channels
-    if not await force_join_ok(uid):
-        return HTMLResponse("<h3>Please join all channels first, then verify again.</h3>", status_code=403)
-
-    assert pool is not None
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            row = await conn.fetchrow("SELECT verified, referred_by FROM public.bot_users WHERE user_id=$1 FOR UPDATE", uid)
-            if not row:
-                await conn.execute("INSERT INTO public.bot_users(user_id, verified) VALUES($1, TRUE)", uid)
-                row = {"verified": False, "referred_by": None}
-
-            if not row["verified"]:
-                await conn.execute("UPDATE public.bot_users SET verified=TRUE, updated_at=NOW() WHERE user_id=$1", uid)
-                ref = row["referred_by"]
-                if ref:
-                    await conn.execute("""
-                        UPDATE public.bot_users
-                        SET points=points+1, total_referrals=total_referrals+1, updated_at=NOW()
-                        WHERE user_id=$1
-                    """, ref)
-
-    return HTMLResponse(SUCCESS_PAGE_HTML.format(name=BOT_DISPLAY_NAME, bot=BOT_USERNAME))
-
+    
 # ================= WEBHOOK =================
 @app.post("/webhook")
 async def webhook(req: Request):
