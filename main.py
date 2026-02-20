@@ -330,23 +330,230 @@ async def handle_callback(cb):
     return {"ok": True}
 
 # ================= WEB VERIFICATION =================
+BOT_DISPLAY_NAME = "ZenithWave Refer Bot"  # Change name shown on web page
+
+VERIFY_PAGE_HTML = r"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{name} • Verification</title>
+  <style>
+    :root{
+      --bg1:#070a12; --bg2:#0b1224;
+      --stroke: rgba(255,255,255,.12);
+      --text:#eaf0ff; --muted: rgba(234,240,255,.72);
+      --btn1:#5b8cff; --btn2:#2b58ff;
+      --ok:#2ee59d;
+    }
+    *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+    body{
+      margin:0; min-height:100vh; display:grid; place-items:center;
+      padding:24px; color:var(--text);
+      background:
+        radial-gradient(1200px 600px at 15% 10%, rgba(91,140,255,.35), transparent 55%),
+        radial-gradient(900px 500px at 92% 35%, rgba(155,91,255,.26), transparent 60%),
+        linear-gradient(160deg,var(--bg1),var(--bg2));
+    }
+    .card{
+      width:min(560px,100%);
+      border:1px solid var(--stroke);
+      background: linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.04));
+      backdrop-filter: blur(10px);
+      border-radius:20px;
+      padding:22px;
+      box-shadow: 0 20px 70px rgba(0,0,0,.55);
+      position:relative;
+      overflow:hidden;
+    }
+    .header{display:flex;gap:14px;align-items:center}
+    .logo{
+      width:52px;height:52px;border-radius:16px;
+      background: linear-gradient(135deg,#5b8cff,#9b5bff);
+      display:grid;place-items:center;
+      font-weight:900;font-size:18px;
+      box-shadow: 0 12px 30px rgba(91,140,255,.24);
+      flex: 0 0 auto;
+    }
+    .title{margin:0;font-size:18px;line-height:1.25}
+    .subtitle{margin:6px 0 0;color:var(--muted);line-height:1.5}
+    .divider{height:1px;background:rgba(255,255,255,.10);margin:16px 0}
+    .btn{
+      display:inline-flex;align-items:center;justify-content:center;
+      width:100%;padding:14px 16px;border:none;border-radius:14px;
+      background: linear-gradient(135deg,var(--btn1),var(--btn2));
+      color:white;font-weight:800;font-size:16px;cursor:pointer;
+      box-shadow: 0 16px 34px rgba(43,88,255,.28);
+      transition: transform .08s ease, filter .2s ease;
+    }
+    .btn:active{transform:scale(.99)}
+    .btn[disabled]{opacity:.7;cursor:not-allowed;filter:saturate(.6)}
+    .small{margin-top:12px;color:rgba(234,240,255,.68);font-size:13px;text-align:center}
+    .chip{
+      display:inline-flex;align-items:center;gap:8px;
+      margin-top:12px;padding:8px 10px;border-radius:999px;
+      border:1px solid rgba(46,229,157,.35);
+      background: rgba(46,229,157,.10);
+      color: var(--ok); font-size:13px;
+    }
+    .overlay{
+      position:absolute; inset:0;
+      display:none; place-items:center;
+      background: rgba(7,10,18,.72);
+      backdrop-filter: blur(8px);
+    }
+    .overlay.on{display:grid;}
+    .panel{
+      width:min(420px, 92%);
+      border:1px solid rgba(255,255,255,.16);
+      border-radius:18px;
+      padding:18px;
+      background: rgba(255,255,255,.08);
+      box-shadow: 0 20px 70px rgba(0,0,0,.55);
+      text-align:center;
+    }
+    .spinner{
+      width:56px;height:56px;border-radius:50%;
+      border:4px solid rgba(255,255,255,.18);
+      border-top-color: rgba(91,140,255,.95);
+      animation: spin 1s linear infinite;
+      margin: 2px auto 14px;
+    }
+    @keyframes spin{to{transform:rotate(360deg)}}
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="header">
+      <div class="logo">Z</div>
+      <div>
+        <h1 class="title">{name}</h1>
+        <p class="subtitle">Tap below to verify and unlock the bot menu.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <form id="verifyForm" method="POST" action="/verify">
+      <input type="hidden" name="uid" value="{uid}">
+      <input type="hidden" name="token" value="{token}">
+      <button id="verifyBtn" class="btn" type="submit">✅ Verify Now</button>
+    </form>
+
+    <div class="small">
+      After verification, you will be redirected to Telegram automatically.
+      <div class="chip">🔒 Secure verification link</div>
+    </div>
+
+    <div id="overlay" class="overlay">
+      <div class="panel">
+        <div class="spinner"></div>
+        <h2 style="margin:0 0 6px;font-size:18px">Verifying…</h2>
+        <p style="margin:0;color:rgba(234,240,255,.72);line-height:1.5">Please wait a moment.</p>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const form = document.getElementById("verifyForm");
+    const overlay = document.getElementById("overlay");
+    const btn = document.getElementById("verifyBtn");
+    form.addEventListener("submit", () => {
+      overlay.classList.add("on");
+      btn.setAttribute("disabled", "disabled");
+    });
+  </script>
+</body>
+</html>
+"""
+
+SUCCESS_PAGE_HTML = r"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{name} • Verified</title>
+  <style>
+    :root{--bg1:#070a12;--bg2:#0b1224;--text:#eaf0ff;--muted:rgba(234,240,255,.72);--ok:#2ee59d}
+    *{box-sizing:border-box;font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,Cantarell,Noto Sans,sans-serif}
+    body{
+      margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:var(--text);
+      background:
+        radial-gradient(1200px 600px at 15% 10%, rgba(91,140,255,.35), transparent 55%),
+        radial-gradient(900px 500px at 92% 35%, rgba(155,91,255,.26), transparent 60%),
+        linear-gradient(160deg,var(--bg1),var(--bg2));
+    }
+    .box{
+      width:min(520px,100%);
+      border-radius:20px;
+      padding:22px;
+      background: rgba(255,255,255,.07);
+      border:1px solid rgba(255,255,255,.14);
+      box-shadow: 0 20px 70px rgba(0,0,0,.55);
+      text-align:center;
+    }
+    .ok{
+      width:70px;height:70px;border-radius:22px;
+      background: rgba(46,229,157,.12);
+      border:1px solid rgba(46,229,157,.35);
+      display:grid;place-items:center;
+      margin: 0 auto 12px;
+      font-size:34px;color:var(--ok);
+    }
+    h1{margin:0 0 6px;font-size:20px}
+    p{margin:0;color:var(--muted);line-height:1.5}
+    .small{margin-top:10px;font-size:13px;color:rgba(234,240,255,.62)}
+  </style>
+</head>
+<body>
+  <div class="box">
+    <div class="ok">✅</div>
+    <h1>Verified ✅</h1>
+    <p>Redirecting you back to Telegram…</p>
+    <div class="small">{name}</div>
+  </div>
+
+  <script>
+    setTimeout(() => {
+      window.location.href = "https://t.me/{bot}";
+    }, 1200);
+  </script>
+</body>
+</html>
+"""
+
 @app.get("/verify", response_class=HTMLResponse)
-async def verify(uid: int, token: str):
+async def verify_page(uid: int, token: str):
+    expected = hashlib.sha256(str(uid).encode()).hexdigest()
+    if token != expected:
+        return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
+
+    return HTMLResponse(VERIFY_PAGE_HTML.format(uid=uid, token=token, name=BOT_DISPLAY_NAME))
+
+@app.post("/verify", response_class=HTMLResponse)
+async def verify_submit(request: Request):
+    form = await request.form()
+    uid = int(form.get("uid", "0"))
+    token = str(form.get("token", ""))
+
+    expected = hashlib.sha256(str(uid).encode()).hexdigest()
+    if token != expected:
+        return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
+
     async with pool.acquire() as conn:
-        await conn.execute("""
-            UPDATE users SET verified=TRUE WHERE user_id=$1
-        """, uid)
+        already = await conn.fetchval("SELECT verified FROM users WHERE user_id=$1", uid)
+        if not already:
+            await conn.execute("UPDATE users SET verified=TRUE WHERE user_id=$1", uid)
 
-        ref = await conn.fetchval("""
-            SELECT referred_by FROM users WHERE user_id=$1
-        """, uid)
+            ref = await conn.fetchval("SELECT referred_by FROM users WHERE user_id=$1", uid)
+            if ref:
+                await conn.execute("""
+                    UPDATE users
+                    SET points = points + 1,
+                        total_referrals = total_referrals + 1
+                    WHERE user_id = $1
+                """, ref)
 
-        if ref:
-            await conn.execute("""
-                UPDATE users SET
-                points=points+1,
-                total_referrals=total_referrals+1
-                WHERE user_id=$1
-            """, ref)
-
-    return RedirectResponse(f"https://t.me/{BOT_USERNAME}")
+    return HTMLResponse(SUCCESS_PAGE_HTML.format(name=BOT_DISPLAY_NAME, bot=BOT_USERNAME))
