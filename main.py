@@ -1,6 +1,14 @@
 import ssl
 import hashlib
 import re
+import traceback
+from fastapi.responses import JSONResponse
+
+@app.exception_handler(Exception)
+async def all_exception_handler(request: Request, exc: Exception):
+    print("🔥 ERROR:", repr(exc))
+    traceback.print_exc()
+    return JSONResponse(status_code=500, content={"ok": False, "error": str(exc)})
 from typing import Optional, Dict, Any
 
 import asyncpg
