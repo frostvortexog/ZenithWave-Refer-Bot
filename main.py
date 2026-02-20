@@ -221,7 +221,7 @@ async def dbtest():
 VERIFY_PAGE_HTML = r"""
 <!doctype html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{name} • Verification</title>
+<title>__NAME__ • Verification</title>
 <style>
 body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:#eaf0ff;
 background:radial-gradient(1200px 600px at 15% 10%, rgba(91,140,255,.35), transparent 55%),
@@ -239,11 +239,11 @@ border-top-color:rgba(91,140,255,.95);animation:spin 1s linear infinite;margin:2
 @keyframes spin{to{transform:rotate(360deg)}}
 </style></head><body>
 <div class="card">
-  <h2 style="margin:0 0 6px">{name}</h2>
+  <h2 style="margin:0 0 6px">__NAME__</h2>
   <p style="margin:0 0 16px;color:rgba(234,240,255,.72)">Tap verify to unlock the bot menu.</p>
   <form id="vf" method="POST" action="/verify">
-    <input type="hidden" name="uid" value="{uid}"/>
-    <input type="hidden" name="token" value="{token}"/>
+    <input type="hidden" name="uid" value="__UID__"/>
+    <input type="hidden" name="token" value="__TOKEN__"/>
     <button class="btn" id="vb" type="submit">✅ Verify Now</button>
   </form>
   <div id="ov" class="overlay">
@@ -266,7 +266,7 @@ document.getElementById("vf").addEventListener("submit", ()=>{
 SUCCESS_PAGE_HTML = r"""
 <!doctype html><html><head>
 <meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>{name} • Verified</title>
+<title>__NAME__ • Verified</title>
 <style>
 body{margin:0;min-height:100vh;display:grid;place-items:center;padding:24px;color:#eaf0ff;
 background:radial-gradient(1200px 600px at 15% 10%, rgba(91,140,255,.35), transparent 55%),
@@ -279,10 +279,10 @@ border:1px solid rgba(255,255,255,.14);box-shadow:0 20px 70px rgba(0,0,0,.55);te
   <div style="font-size:44px">✅</div>
   <h2 style="margin:6px 0">Verified ✅</h2>
   <p style="margin:0;color:rgba(234,240,255,.72)">Redirecting to Telegram…</p>
-  <p style="margin:10px 0 0;color:rgba(234,240,255,.62);font-size:13px">{name}</p>
+  <p style="margin:10px 0 0;color:rgba(234,240,255,.62);font-size:13px">__NAME__</p>
 </div>
 <script>
-setTimeout(()=>{ window.location.href="https://t.me/{bot}"; }, 1200);
+setTimeout(()=>{ window.location.href="https://t.me/__BOT__"; }, 1200);
 </script>
 </body></html>
 """
@@ -291,7 +291,13 @@ setTimeout(()=>{ window.location.href="https://t.me/{bot}"; }, 1200);
 async def verify_page(uid: int, token: str):
     if token != make_token(uid):
         return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
-    return HTMLResponse(VERIFY_PAGE_HTML.format(uid=uid, token=token, name=BOT_DISPLAY_NAME))
+
+    html = (VERIFY_PAGE_HTML
+            .replace("__NAME__", BOT_DISPLAY_NAME)
+            .replace("__UID__", str(uid))
+            .replace("__TOKEN__", token))
+    return HTMLResponse(html)
+
 
 @app.post("/verify", response_class=HTMLResponse)
 async def verify_submit(request: Request):
@@ -301,6 +307,13 @@ async def verify_submit(request: Request):
 
     if token != make_token(uid):
         return HTMLResponse("<h3>Invalid verification link</h3>", status_code=403)
+
+    # ... your DB verify logic ...
+
+    html = (SUCCESS_PAGE_HTML
+            .replace("__NAME__", BOT_DISPLAY_NAME)
+            .replace("__BOT__", BOT_USERNAME))
+    return HTMLResponse(html)
 
     # Must still be in all channels
     if not await force_join_ok(uid):
