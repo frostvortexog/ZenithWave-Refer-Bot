@@ -10,8 +10,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 # ================= CONFIG =================
-BOT_TOKEN = "PUT_NEW_BOT_TOKEN_HERE"
-DATABASE_URL = "postgresql://USER:PASSWORD@HOST:5432/postgres"
+BOT_TOKEN = "8566776302:AAFzmjD96qirFe5P0OTI7orA29H8lbfEaGU"
+DATABASE_URL = "postgresql://postgres.rhswwhjuaxkbjrsquevl:RadheyRadhe@aws-1-ap-south-1.pooler.supabase.com:5432/postgres"
 BOT_USERNAME = "Sheinn_Refer_Bot"  # without @
 BASE_URL = "https://zenithwave-refer-bot.onrender.com"
 
