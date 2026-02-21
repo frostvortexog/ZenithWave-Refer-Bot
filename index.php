@@ -1,4 +1,4 @@
-  <?php
+    <?php
   // =====================
   // ULTRA SECURE ENTERPRISE Referral Bot (Webhook)
   // - 3 Force Join Channels
@@ -81,40 +81,6 @@ function adminKeyboard() {
   ];
 }
   
-  function inlineForceJoinKeyboard() {
-    global $FORCE_CHANNELS, $FORCE_JOIN_LINK;
-  
-    $kb = [];
-  
-    // ✅ Single private channel mode (recommended now)
-    if (count($FORCE_CHANNELS) === 1 && $FORCE_JOIN_LINK) {
-      $kb[] = [[
-        "text" => "📢 Join Channel",
-        "url"  => $FORCE_JOIN_LINK
-      ]];
-    } else {
-      // ✅ Multi-channel mode for later (public + private ids)
-      foreach ($FORCE_CHANNELS as $c) {
-        if (is_numeric($c)) {
-          // Private channel ID: can't auto-create URL, needs invite link
-          $kb[] = [[
-            "text" => "📢 Join Private Channel",
-            "url"  => $FORCE_JOIN_LINK ?: "https://t.me/"
-          ]];
-        } else {
-          // Public channel username
-          $kb[] = [[
-            "text" => "📢 Join $c",
-            "url"  => "https://t.me/" . str_replace("@", "", $c)
-          ]];
-        }
-      }
-    }
-  
-    $kb[] = [[ "text" => "✅ Joined All Channels", "callback_data" => "check_join" ]];
-  
-    return ["inline_keyboard" => $kb];
-  }
   
   function inlineWebVerifyKeyboard($verifyUrl) {
     return ["inline_keyboard" => [
@@ -174,19 +140,6 @@ function inlineForceJoinKeyboard() {
 
   $kb[] = [[ "text" => "✅ Joined All Channels", "callback_data" => "check_join" ]];
   return ["inline_keyboard" => $kb];
-}
-
-function isJoinedAll($user_id) {
-  $rows = getForceChannels();
-  if (!$rows) return true;
-
-  foreach ($rows as $r) {
-    $ch = $r["chat_id"];
-    $res = bot("getChatMember", ["chat_id" => $ch, "user_id" => $user_id]);
-    $status = $res["result"]["status"] ?? null;
-    if (!in_array($status, ["member", "administrator", "creator"], true)) return false;
-  }
-  return true;
 }
   
   function rateLimitOk($user_id, $bucket, $max = 8, $windowSec = 10) {
