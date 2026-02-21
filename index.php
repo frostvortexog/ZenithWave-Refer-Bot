@@ -19,11 +19,8 @@ $BOT_USERNAME = getenv("BOT_USERNAME");
 $BASE_URL = rtrim(getenv("BASE_URL"), '/');
 $CRON_SECRET = getenv("CRON_SECRET");
 
-$FORCE_CHANNELS = array_filter([
-  getenv("FORCE_CHANNEL_1"),
-  getenv("FORCE_CHANNEL_2"),
-  getenv("FORCE_CHANNEL_3")
-]);
+$FORCE_CHANNELS = array_filter(array_map('trim', explode(',', getenv("FORCE_CHANNELS") ?: "")));
+$FORCE_JOIN_LINK = getenv("FORCE_JOIN_LINK"); // invite link for private channel
 
 if (!$BOT_TOKEN || !$DB_URL || !$BOT_USERNAME || !$BASE_URL) {
   http_response_code(500);
@@ -84,15 +81,37 @@ function adminKeyboard() {
 }
 
 function inlineForceJoinKeyboard() {
-  global $FORCE_CHANNELS;
+  global $FORCE_CHANNELS, $FORCE_JOIN_LINK;
+
   $kb = [];
-  foreach ($FORCE_CHANNELS as $c) {
+
+  // ✅ Single private channel mode (recommended now)
+  if (count($FORCE_CHANNELS) === 1 && $FORCE_JOIN_LINK) {
     $kb[] = [[
-      "text" => "Join " . $c,
-      "url" => "https://t.me/" . str_replace("@", "", $c)
+      "text" => "📢 Join Channel",
+      "url"  => $FORCE_JOIN_LINK
     ]];
+  } else {
+    // ✅ Multi-channel mode for later (public + private ids)
+    foreach ($FORCE_CHANNELS as $c) {
+      if (is_numeric($c)) {
+        // Private channel ID: can't auto-create URL, needs invite link
+        $kb[] = [[
+          "text" => "📢 Join Private Channel",
+          "url"  => $FORCE_JOIN_LINK ?: "https://t.me/"
+        ]];
+      } else {
+        // Public channel username
+        $kb[] = [[
+          "text" => "📢 Join $c",
+          "url"  => "https://t.me/" . str_replace("@", "", $c)
+        ]];
+      }
+    }
   }
+
   $kb[] = [[ "text" => "✅ Joined All Channels", "callback_data" => "check_join" ]];
+
   return ["inline_keyboard" => $kb];
 }
 
