@@ -566,6 +566,69 @@ function isJoinedAll($user_id) {
     // ================= ADMIN MENU =================
     if (isAdmin($user_id)) {
 
+      // ✅ IMPORTANT: Handle admin states FIRST (so @channel / -100... doesn't go to fallback)
+$st = getState($user_id);
+
+// Step 1: admin sends channel id
+if ($st["s"] === "ADMIN_ADD_CHANNEL") {
+  $ch = trim($text);
+
+  if (!(strpos($ch, "@") === 0 || strpos($ch, "-100") === 0)) {
+    bot("sendMessage", ["chat_id"=>$chat_id, "text"=>"❌ Invalid. Send @channel or -100xxxx"]);
+    exit;
+  }
+
+  setState($user_id, "ADMIN_ADD_CHANNEL_LINK", ["chat_id"=>$ch]);
+  bot("sendMessage", [
+    "chat_id"=>$chat_id,
+    "text"=>"✅ Now send invite link.\n\nType: skip (for public)\nOr paste invite link (for private): https://t.me/+xxxxx"
+  ]);
+  exit;
+}
+
+// Step 2: admin sends invite link
+if ($st["s"] === "ADMIN_ADD_CHANNEL_LINK") {
+  $ch = $st["m"]["chat_id"] ?? null;
+  if (!$ch) { clearState($user_id); exit; }
+
+  $link = trim($text);
+  if (strtolower($link) === "skip") $link = null;
+
+  if (strpos($ch, "-100") === 0 && (!$link || stripos($link, "t.me/") === false)) {
+    bot("sendMessage", ["chat_id"=>$chat_id, "text"=>"❌ Private channel needs valid invite link (https://t.me/+...)"]);
+    exit;
+  }
+
+  $stmt = $pdo->prepare("
+    INSERT INTO force_channels(chat_id, invite_link, is_active)
+    VALUES (?, ?, true)
+    ON CONFLICT (chat_id) DO UPDATE SET invite_link=EXCLUDED.invite_link, is_active=true
+  ");
+  $stmt->execute([$ch, $link]);
+
+  clearState($user_id);
+  bot("sendMessage", [
+    "chat_id"=>$chat_id,
+    "text"=>"✅ Channel added/updated: $ch",
+    "reply_markup"=>json_encode(adminKeyboard())
+  ]);
+  exit;
+}
+
+// Remove channel
+if ($st["s"] === "ADMIN_REMOVE_CHANNEL") {
+  $ch = trim($text);
+  $pdo->prepare("DELETE FROM force_channels WHERE chat_id=?")->execute([$ch]);
+
+  clearState($user_id);
+  bot("sendMessage", [
+    "chat_id"=>$chat_id,
+    "text"=>"✅ Removed (if existed): $ch",
+    "reply_markup"=>json_encode(adminKeyboard())
+  ]);
+  exit;
+}
+
       // Force Channels
 if ($text === "Force Channels") {
   clearState($user_id);
