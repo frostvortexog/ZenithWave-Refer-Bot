@@ -1,4 +1,4 @@
-    <?php
+  <?php
   // =====================
   // ULTRA SECURE ENTERPRISE Referral Bot (Webhook)
   // - 3 Force Join Channels
@@ -141,6 +141,19 @@ function inlineForceJoinKeyboard() {
   $kb[] = [[ "text" => "✅ Joined All Channels", "callback_data" => "check_join" ]];
   return ["inline_keyboard" => $kb];
 }
+
+function isJoinedAll($user_id) {
+  $rows = getForceChannels();
+  if (!$rows) return true;
+
+  foreach ($rows as $r) {
+    $ch = $r["chat_id"];
+    $res = bot("getChatMember", ["chat_id" => $ch, "user_id" => $user_id]);
+    $status = $res["result"]["status"] ?? null;
+    if (!in_array($status, ["member", "administrator", "creator"], true)) return false;
+  }
+  return true;
+}
   
   function rateLimitOk($user_id, $bucket, $max = 8, $windowSec = 10) {
     // Basic per-process throttling is not reliable across instances.
@@ -156,15 +169,6 @@ function inlineForceJoinKeyboard() {
     return true;
   }
   
-  function isJoinedAll($user_id) {
-    global $FORCE_CHANNELS;
-    foreach ($FORCE_CHANNELS as $ch) {
-      $res = bot("getChatMember", ["chat_id" => $ch, "user_id" => $user_id]);
-      $status = $res["result"]["status"] ?? null;
-      if (!in_array($status, ["member", "administrator", "creator"], true)) return false;
-    }
-    return true;
-  }
   
   function ensureUser($user_id, $username) {
     global $pdo;
