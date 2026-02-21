@@ -503,7 +503,7 @@ function isJoinedAll($user_id) {
       if (!isJoinedAll($user_id)) {
         bot("sendMessage", [
           "chat_id"=>$chat_id,
-          "text"=>"❌ You must stay joined to all 3 channels.\n\nJoin again and verify:\n/start",
+          "text"=>"❌ You must stay joined to all channels.\n\nJoin again and verify:\n/start",
         ]);
         exit;
       }
@@ -592,7 +592,8 @@ if ($text === "Force Channels") {
   exit;
 }
 
-if ($text === "addchannel") {
+// Add Channel (accept both)
+if ($text === "addchannel" || $text === "add channel" || $text === "Add Channel") {
   setState($user_id, "ADMIN_ADD_CHANNEL", null);
   bot("sendMessage", [
     "chat_id" => $chat_id,
@@ -601,7 +602,8 @@ if ($text === "addchannel") {
   exit;
 }
 
-if ($text === "removechannel") {
+// Remove Channel (accept both)
+if ($text === "removechannel" || $text === "remove channel" || $text === "Remove Channel") {
   setState($user_id, "ADMIN_REMOVE_CHANNEL", null);
   bot("sendMessage", [
     "chat_id" => $chat_id,
