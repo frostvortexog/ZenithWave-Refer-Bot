@@ -455,7 +455,7 @@ if ($text) {
 
     bot("sendMessage", [
       "chat_id" => $chat_id,
-      "text" => "👋 Welcome!\n\n✅ Step 1: Join all 3 channels\n✅ Step 2: Tap *Joined All Channels*\n✅ Step 3: Complete web verification",
+      "text" => "👋 Welcome!\n\n✅ Step 1: Join all 1 channels\n✅ Step 2: Tap *Joined All Channels*\n✅ Step 3: Complete web verification",
       "parse_mode" => "Markdown",
       "reply_markup" => json_encode(inlineForceJoinKeyboard())
     ]);
