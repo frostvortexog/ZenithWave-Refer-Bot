@@ -566,8 +566,7 @@ function isJoinedAll($user_id) {
     // ================= ADMIN MENU =================
     if (isAdmin($user_id)) {
 
-      // ✅ IMPORTANT: Handle admin states FIRST (so @channel / -100... doesn't go to fallback)
-$st = getState($user_id);
+      $st = getState($user_id);
 
 // Step 1: admin sends channel id
 if ($st["s"] === "ADMIN_ADD_CHANNEL") {
