@@ -1,16 +1,7 @@
-FROM php:8.2-apache
+FROM php:8.2-cli
 
-RUN a2enmod rewrite
+WORKDIR /app
+COPY . /app
 
-RUN apt-get update && apt-get install -y libpq-dev \
-  && docker-php-ext-install pdo pdo_pgsql \
-  && apt-get clean && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /var/www/html
-COPY . /var/www/html
-
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
-
-EXPOSE 10000
-CMD ["/start.sh"]
+# Render provides $PORT. We must bind to it.
+CMD ["sh", "-c", "php -S 0.0.0.0:${PORT} -t /app"]
