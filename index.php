@@ -1,4 +1,5 @@
 <?php
+file_put_contents("php://stderr", "HIT ".date("c")." ".$_SERVER["REQUEST_METHOD"]." ".$_SERVER["REQUEST_URI"]."\n");
 // =====================================================
 // TELEGRAM REFERRAL BOT (Webhook) - FULL WORKING
 // PHP + Render + Supabase Postgres (PDO)
